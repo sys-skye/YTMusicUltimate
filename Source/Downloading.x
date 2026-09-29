@@ -18,6 +18,13 @@ static BOOL YTMU(NSString *key) {
     return [YTMUltimateDict[key] boolValue];
 }
 
+// Newer YT Music (9.34+) renamed -[YTPlayerViewController playerResponse] to -contentPlayerResponse.
+static YTPlayerResponse *YTMUPlayerResponse(YTPlayerViewController *playerVC) {
+    if ([playerVC respondsToSelector:@selector(contentPlayerResponse)]) return playerVC.contentPlayerResponse;
+    if ([playerVC respondsToSelector:@selector(playerResponse)]) return playerVC.playerResponse;
+    return nil;
+}
+
 @interface UIView ()
 - (UIViewController *)_viewControllerForAncestor;
 @end
@@ -54,7 +61,7 @@ static BOOL YTMU(NSString *key) {
     YTMNowPlayingViewController *playingVC = (YTMNowPlayingViewController *)tapRecognizer.view._viewControllerForAncestor;
     YTMWatchViewController *watchVC = (YTMWatchViewController *)playingVC.parentViewController;
     YTPlayerViewController *playerVC = watchVC.playerViewController;
-    YTPlayerResponse *playerResponse = playerVC.playerResponse;
+    YTPlayerResponse *playerResponse = YTMUPlayerResponse(playerVC);
 
     if (playerResponse) {
         YTMActionSheetController *sheetController = [%c(YTMActionSheetController) musicActionSheetController];
@@ -90,7 +97,7 @@ static BOOL YTMU(NSString *key) {
 
 %new
 - (void)downloadAudio:(YTPlayerViewController *)playerVC {
-    YTPlayerResponse *playerResponse = playerVC.playerResponse;
+    YTPlayerResponse *playerResponse = YTMUPlayerResponse(playerVC);
 
     NSString *title = [playerResponse.playerData.videoDetails.title stringByReplacingOccurrencesOfString:@"/" withString:@""];
     NSString *author = [playerResponse.playerData.videoDetails.author stringByReplacingOccurrencesOfString:@"/" withString:@""];
@@ -156,7 +163,7 @@ static BOOL YTMU(NSString *key) {
         hud.mode = MBProgressHUDModeIndeterminate;
     });
 
-    YTPlayerResponse *playerResponse = playerVC.playerResponse;
+    YTPlayerResponse *playerResponse = YTMUPlayerResponse(playerVC);
 
     NSMutableArray *thumbnailsArray = playerResponse.playerData.videoDetails.thumbnail.thumbnailsArray;
     YTIThumbnailDetails_Thumbnail *thumbnail = [thumbnailsArray lastObject];
