@@ -22,7 +22,7 @@
 
     self.hud = [MBProgressHUD showHUDAddedTo:[UIApplication sharedApplication].keyWindow animated:YES];
     self.hud.mode = MBProgressHUDModeAnnularDeterminate;
-    self.hud.label.text = LOC(@"DOWNLOADING");
+    self.hud.label.text = self.progressPrefix ? [NSString stringWithFormat:@"%@ %@", self.progressPrefix, LOC(@"DOWNLOADING")] : LOC(@"DOWNLOADING");
 
     NSURL *documentsURL = [[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
     NSURL *destinationURL = [documentsURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.m4a", self.tempName]];
@@ -41,6 +41,9 @@
 
                 if (isMoved) {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ReloadDataNotification" object:nil];
+                }
+
+                if (isMoved && !self.progressPrefix) {
                     self.hud = [MBProgressHUD showHUDAddedTo:[UIApplication sharedApplication].keyWindow animated:YES];
                     self.hud.mode = MBProgressHUDModeCustomView;
                     self.hud.label.text = LOC(@"DONE");
@@ -52,10 +55,13 @@
 
                     [self.hud hideAnimated:YES afterDelay:3.0];
                 }
+
+                [self finishWithResult:isMoved ? FFMpegDownloadResultSuccess : FFMpegDownloadResultFailed];
             } else if (returnCode == RETURN_CODE_CANCEL) {
                 [self.hud hideAnimated:YES];
 
                 [[NSFileManager defaultManager] removeItemAtURL:destinationURL error:nil];
+                [self finishWithResult:FFMpegDownloadResultCancelled];
             } else {
                 if (self.hud && self.hud.mode == MBProgressHUDModeAnnularDeterminate) {
                     self.hud.mode = MBProgressHUDModeCustomView;
@@ -71,9 +77,16 @@
                 }
 
                 [[NSFileManager defaultManager] removeItemAtURL:destinationURL error:nil];
+                [self finishWithResult:FFMpegDownloadResultFailed];
             }
         });
     });
+}
+
+- (void)finishWithResult:(FFMpegDownloadResult)result {
+    void (^completion)(FFMpegDownloadResult) = self.completionHandler;
+    self.completionHandler = nil;
+    if (completion) completion(result);
 }
 
 - (void)logCallback:(long)executionId :(int)level :(NSString*)message {
@@ -95,6 +108,7 @@
     int timeInMilliseconds = [statistics getTime];
     if (timeInMilliseconds > 0) {
         double totalVideoDuration = self.duration;
+        if (totalVideoDuration <= 0) return;
         double timeInSeconds = timeInMilliseconds / 1000.0;
         double percentage = timeInSeconds / totalVideoDuration;
 

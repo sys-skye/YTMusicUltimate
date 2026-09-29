@@ -119,3 +119,9 @@
 "ALL_DOWNLOADS" = "all download audios"; //keep it lowercase
 "DELETE" = "Delete";
 "RENAME" = "Rename";
+"DOWNLOAD_QUEUE" = "Download rest of queue";
+"QUEUE_DOWNLOAD_RUNNING" = "Queue download already running";
+"QUEUE_DOWNLOAD_FINISHED" = "Queue download finished";
+"QUEUE_DOWNLOAD_STOPPED" = "Queue download stopped";
+"QUEUE_DOWNLOAD_SUMMARY" = "%lu downloaded, %lu already downloaded, %lu failed";
+"QUEUE_EMPTY" = "Nothing in the queue";

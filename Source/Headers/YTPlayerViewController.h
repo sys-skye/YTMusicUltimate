@@ -9,6 +9,7 @@
 @property (nonatomic, strong) NSMutableDictionary *sponsorBlockValues;
 
 - (void)seekToTime:(CGFloat)time;
+- (void)pause;
 - (NSString *)currentVideoID;
 - (CGFloat)currentVideoMediaTime;
 - (void)skipSegment;

@@ -1,7 +1,9 @@
 #import "YTIThumbnailDetails.h"
 
 @interface YTIVideoDetails : NSObject
+@property (nonatomic, copy, readwrite) NSString *videoId;
 @property (nonatomic, copy, readwrite) NSString *title;
 @property (nonatomic, copy, readwrite) NSString *author;
 @property (nonatomic, strong, readwrite) YTIThumbnailDetails *thumbnail;
+@property (nonatomic, assign, readwrite) unsigned long long lengthSeconds;
 @end
