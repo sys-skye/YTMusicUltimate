@@ -1,4 +1,10 @@
 #import "YTMDownloads.h"
+#import "YTMUDownloadsPlayer.h"
+
+static NSString *YTMULocalizedOr(NSString *key, NSString *fallback) {
+    NSString *string = LOC(key);
+    return (string.length > 0 && ![string isEqualToString:key]) ? string : fallback;
+}
 
 @implementation YTMDownloads
 
@@ -82,7 +88,14 @@
     NSPredicate *mp3Predicate = [NSPredicate predicateWithFormat:@"SELF ENDSWITH[c] '.mp3'"];
     NSPredicate *predicate = [NSCompoundPredicate orPredicateWithSubpredicates:@[m4aPredicate, mp3Predicate]];
 
-    self.audioFiles = [NSMutableArray arrayWithArray:[allFiles filteredArrayUsingPredicate:predicate]];
+    // Oldest download first, so a downloaded queue stays in playlist order
+    NSMutableDictionary<NSString *, NSDate *> *creationDates = [NSMutableDictionary dictionary];
+    for (NSString *file in [allFiles filteredArrayUsingPredicate:predicate]) {
+        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[downloadsURL.path stringByAppendingPathComponent:file] error:nil];
+        creationDates[file] = attributes.fileCreationDate ?: [NSDate distantPast];
+    }
+
+    self.audioFiles = [NSMutableArray arrayWithArray:[creationDates keysSortedByValueUsingSelector:@selector(compare:)]];
 
     self.imageView.tintColor = self.audioFiles.count == 0 ? [[UIColor whiteColor] colorWithAlphaComponent:0.8] : [UIColor clearColor];
     self.label.textColor = self.audioFiles.count == 0 ? [[UIColor whiteColor] colorWithAlphaComponent:0.8] : [UIColor clearColor];
@@ -114,7 +127,7 @@
     }
 
     if (section == 1) {
-        return 2;
+        return 3;
     }
 
     return 0;
@@ -151,6 +164,7 @@
     else if (indexPath.section == 1) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"cell0"];
         NSArray *settingsData = @[
+            @{@"title": YTMULocalizedOr(@"SHUFFLE_ALL", @"Shuffle all"), @"icon": @"shuffle"},
             @{@"title": LOC(@"SHARE_ALL"), @"icon": @"square.and.arrow.up.on.square"},
             @{@"title": LOC(@"REMOVE_ALL"), @"icon": @"trash"},
         ];
@@ -161,7 +175,7 @@
         cell.textLabel.textColor = [UIColor whiteColor];
         cell.textLabel.adjustsFontSizeToFitWidth = YES;
         cell.imageView.image = [UIImage systemImageNamed:data[@"icon"]];
-        cell.imageView.tintColor = indexPath.row == 1 ? [UIColor redColor] : [UIColor colorWithRed:30.0/255.0 green:150.0/255.0 blue:245.0/255.0 alpha:1.0];
+        cell.imageView.tintColor = indexPath.row == 2 ? [UIColor redColor] : [UIColor colorWithRed:30.0/255.0 green:150.0/255.0 blue:245.0/255.0 alpha:1.0];
         cell.backgroundColor = [[UIColor grayColor] colorWithAlphaComponent:0.25];
     }
 
@@ -281,70 +295,54 @@
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     // Playing song can conflict with YTMusicPlayer
-    if (indexPath.section == 0) {
-        NSURL *documentsURL = [[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
-        NSURL *audioURL = [documentsURL URLByAppendingPathComponent:[NSString stringWithFormat:@"YTMusicUltimate/%@", self.audioFiles[indexPath.row]]];
-        NSString *imageName = [NSString stringWithFormat:@"%@.png", [self.audioFiles[indexPath.row] stringByDeletingPathExtension]];
-        NSString *documentsDirectory = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-
-        NSString *authorTitleString = [self.audioFiles[indexPath.row] stringByDeletingPathExtension];
-        // NSArray *components = [authorTitleString componentsSeparatedByString:@" - "];
-
-        AVAudioSession *audioSession = [AVAudioSession sharedInstance];
-
-        NSError *setCategoryError = nil;
-        BOOL success = [audioSession setCategory:AVAudioSessionCategoryPlayback error:&setCategoryError];
-
-        if (!success) {
-            NSLog(@"Error setting AVAudioSession category: %@", setCategoryError.localizedDescription);
-        }
-
-        NSError *activationError = nil;
-        success = [audioSession setActive:YES error:&activationError];
-
-        if (!success) {
-            NSLog(@"Error activating AVAudioSession: %@", activationError.localizedDescription);
-        }
-
-        AVPlayerItem *playerItem = [AVPlayerItem playerItemWithURL:audioURL];
-        AVMutableMetadataItem *titleMetadataItem = [AVMutableMetadataItem metadataItem];
-        titleMetadataItem.key = AVMetadataCommonKeyTitle;
-        titleMetadataItem.keySpace = AVMetadataKeySpaceCommon;
-        titleMetadataItem.value = authorTitleString;
-
-        // AVMutableMetadataItem *authorMetadataItem = [AVMutableMetadataItem metadataItem];
-        // authorMetadataItem.key = AVMetadataCommonKeyAlbumName; // It doesn't works
-        // authorMetadataItem.keySpace = AVMetadataKeySpaceCommon;
-        // authorMetadataItem.value = components[0];
-
-        AVMutableMetadataItem *artworkMetadataItem = [AVMutableMetadataItem metadataItem];
-        artworkMetadataItem.key = AVMetadataCommonKeyArtwork;
-        artworkMetadataItem.keySpace = AVMetadataKeySpaceCommon;
-        UIImage *artworkImage = [UIImage imageWithContentsOfFile:[[documentsDirectory stringByAppendingPathComponent:@"YTMusicUltimate"] stringByAppendingPathComponent:imageName]];
-        artworkMetadataItem.value = UIImagePNGRepresentation(artworkImage);
-
-        playerItem.externalMetadata = @[titleMetadataItem, artworkMetadataItem];
-
-        AVPlayerViewController *playerViewController = [[AVPlayerViewController alloc] init];
-        AVPlayer *player = [AVPlayer playerWithPlayerItem:playerItem];
-        playerViewController.player = player;
-
-        [self presentViewController:playerViewController animated:YES completion:^{
-            [player play];
-        }];
+    if (indexPath.section == 0 && indexPath.row < self.audioFiles.count) {
+        [self playFiles:[self audioFileURLs] startIndex:indexPath.row];
     }
 
     if (indexPath.section == 1) {
         if (indexPath.row == 0) {
-            [self shareAll:indexPath];
+            NSMutableArray<NSURL *> *shuffledFiles = [[self audioFileURLs] mutableCopy];
+            for (NSUInteger i = shuffledFiles.count; i > 1; i--) {
+                [shuffledFiles exchangeObjectAtIndex:i - 1 withObjectAtIndex:arc4random_uniform((uint32_t)i)];
+            }
+            [self playFiles:shuffledFiles startIndex:0];
         }
 
         if (indexPath.row == 1) {
+            [self shareAll:indexPath];
+        }
+
+        if (indexPath.row == 2) {
             [self removeAll];
         }
     }
 
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+}
+
+- (NSArray<NSURL *> *)audioFileURLs {
+    NSURL *documentsURL = [[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
+    NSURL *downloadsURL = [documentsURL URLByAppendingPathComponent:@"YTMusicUltimate"];
+
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    for (NSString *file in self.audioFiles) {
+        [urls addObject:[downloadsURL URLByAppendingPathComponent:file]];
+    }
+    return urls;
+}
+
+- (void)playFiles:(NSArray<NSURL *> *)files startIndex:(NSUInteger)index {
+    if (files.count == 0) return;
+
+    YTMUDownloadsPlayer *player = [YTMUDownloadsPlayer sharedPlayer];
+    [player playFiles:files startIndex:index];
+
+    if (!player.presentingViewController) {
+        if (@available(iOS 15.0, *)) {
+            player.sheetPresentationController.prefersGrabberVisible = YES;
+        }
+        [self presentViewController:player animated:YES completion:nil];
+    }
 }
 
 - (void)shareAll:(NSIndexPath *)indexPath {
