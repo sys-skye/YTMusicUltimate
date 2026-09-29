@@ -42,8 +42,23 @@ static void YTMUShowInfo(NSString *title, NSString *subtitle) {
     [alertView show];
 }
 
+// Blocking, call it off the main thread
+static NSData *YTMUFetchData(NSURL *url, NSTimeInterval timeout) {
+    if (!url) return nil;
+
+    __block NSData *result = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    NSURLRequest *request = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:timeout];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        result = data;
+        dispatch_semaphore_signal(semaphore);
+    }] resume];
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 5) * NSEC_PER_SEC)));
+    return result;
+}
+
 static NSString *YTMUAudioURLFromManifest(NSURL *manifest) {
-    NSData *manifestData = [NSData dataWithContentsOfURL:manifest];
+    NSData *manifestData = YTMUFetchData(manifest, 20);
     NSString *manifestString = [[NSString alloc] initWithData:manifestData encoding:NSUTF8StringEncoding];
     NSArray *manifestLines = [manifestString componentsSeparatedByString:@"\n"];
 
@@ -78,33 +93,46 @@ static NSURL *YTMUDownloadsFolderURL(void) {
     return [documentsURL URLByAppendingPathComponent:@"YTMusicUltimate"];
 }
 
-// Downloads the audio (and cover) of the track currently loaded in playerVC. Returns NO if no audio link was found.
-static BOOL YTMUDownloadAudio(YTPlayerViewController *playerVC, NSString *progressPrefix, void (^completion)(FFMpegDownloadResult result)) {
+// Downloads the audio (and cover) of the track currently loaded in playerVC.
+// completion (optional) is called on the main queue; without a progressPrefix errors are shown to the user.
+static void YTMUDownloadAudio(YTPlayerViewController *playerVC, NSString *progressPrefix, void (^completion)(FFMpegDownloadResult result)) {
     YTPlayerResponse *playerResponse = YTMUPlayerResponse(playerVC);
     YTIVideoDetails *videoDetails = playerResponse.playerData.videoDetails;
     NSString *mediaName = YTMUMediaName(playerResponse);
+    NSString *tempName = videoDetails.videoId.length > 0 ? videoDetails.videoId : playerVC.contentVideoID;
+    NSInteger duration = videoDetails.lengthSeconds > 0 ? videoDetails.lengthSeconds : round(playerVC.currentVideoTotalMediaTime);
+    NSURL *manifestURL = [NSURL URLWithString:playerResponse.playerData.streamingData.hlsManifestURL];
+    YTIThumbnailDetails_Thumbnail *thumbnail = [videoDetails.thumbnail.thumbnailsArray lastObject];
+    NSURL *thumbnailURL = [NSURL URLWithString:thumbnail.URL];
 
-    NSString *extractedURL = YTMUAudioURLFromManifest([NSURL URLWithString:playerResponse.playerData.streamingData.hlsManifestURL]);
-    if (extractedURL.length == 0) return NO;
+    NSURL *folderURL = YTMUDownloadsFolderURL();
+    [[NSFileManager defaultManager] createDirectoryAtURL:folderURL withIntermediateDirectories:YES attributes:nil error:nil];
 
-    FFMpegDownloader *ffmpeg = [[FFMpegDownloader alloc] init];
-    ffmpeg.tempName = videoDetails.videoId.length > 0 ? videoDetails.videoId : playerVC.contentVideoID;
-    ffmpeg.mediaName = mediaName;
-    ffmpeg.duration = videoDetails.lengthSeconds > 0 ? videoDetails.lengthSeconds : round(playerVC.currentVideoTotalMediaTime);
-    ffmpeg.progressPrefix = progressPrefix;
-    ffmpeg.completionHandler = completion;
-    [ffmpeg downloadAudio:extractedURL];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *extractedURL = YTMUAudioURLFromManifest(manifestURL);
 
-    NSMutableArray *thumbnailsArray = videoDetails.thumbnail.thumbnailsArray;
-    YTIThumbnailDetails_Thumbnail *thumbnail = [thumbnailsArray lastObject];
-    NSData *imageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:thumbnail.URL]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (extractedURL.length == 0) {
+                if (!progressPrefix) YTMUShowInfo(LOC(@"OOPS"), LOC(@"LINK_NOT_FOUND"));
+                if (completion) completion(FFMpegDownloadResultFailed);
+                return;
+            }
 
-    if (imageData) {
-        NSURL *coverURL = [YTMUDownloadsFolderURL() URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.png", mediaName]];
-        [imageData writeToURL:coverURL atomically:YES];
-    }
+            FFMpegDownloader *ffmpeg = [[FFMpegDownloader alloc] init];
+            ffmpeg.tempName = tempName;
+            ffmpeg.mediaName = mediaName;
+            ffmpeg.duration = duration;
+            ffmpeg.progressPrefix = progressPrefix;
+            ffmpeg.completionHandler = completion;
+            [ffmpeg downloadAudio:extractedURL];
+        });
 
-    return YES;
+        NSData *imageData = YTMUFetchData(thumbnailURL, 20);
+        if (imageData) {
+            NSURL *coverURL = [folderURL URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.png", mediaName]];
+            [imageData writeToURL:coverURL atomically:YES];
+        }
+    });
 }
 
 #pragma mark - Queue downloading
@@ -123,6 +151,7 @@ static BOOL YTMUDownloadAudio(YTPlayerViewController *playerVC, NSString *progre
 @property (nonatomic, assign) NSUInteger failed;
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, assign) NSUInteger polls;
+@property (nonatomic, assign) NSUInteger retries;
 @property (nonatomic, assign) BOOL wasIdleTimerDisabled;
 + (BOOL)canDownloadWithQueueController:(YTQueueController *)queueController;
 + (void)startWithPlayerViewController:(YTPlayerViewController *)playerVC queueController:(YTQueueController *)queueController;
@@ -132,6 +161,7 @@ static YTMUQueueDownloader *activeQueueDownloader;
 static const NSUInteger kYTMUQueueMaxTracks = 500;
 static const NSTimeInterval kYTMUQueuePollInterval = 0.5;
 static const NSUInteger kYTMUQueueMaxPolls = 60; // give each track 30 seconds to load
+static const NSTimeInterval kYTMUQueueTrackDelay = 1.5; // small pause between tracks to go easy on YouTube
 
 @implementation YTMUQueueDownloader
 
@@ -198,7 +228,7 @@ static const NSUInteger kYTMUQueueMaxPolls = 60; // give each track 30 seconds t
     // Not every queue row is a song (e.g. headers), those have no video ID
     NSSet<NSString *> *videoIDs = [self videoIDsForItem:queueController.playbackQueueItems[self.index]];
     if (videoIDs.count == 0) {
-        [self advance];
+        [self advanceAfterDelay:0];
         return;
     }
 
@@ -243,13 +273,13 @@ static const NSUInteger kYTMUQueueMaxPolls = 60; // give each track 30 seconds t
     NSString *fileName = [NSString stringWithFormat:@"%@.m4a", YTMUMediaName(YTMUPlayerResponse(playerVC))];
     if ([[NSFileManager defaultManager] fileExistsAtPath:[YTMUDownloadsFolderURL() URLByAppendingPathComponent:fileName].path]) {
         self.skipped++;
-        [self advance];
+        [self advanceAfterDelay:0];
         return;
     }
 
     NSString *progressPrefix = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)(self.index - self.startIndex + 1), (unsigned long)([self endIndex] - self.startIndex)];
     __weak typeof(self) weakSelf = self;
-    BOOL started = YTMUDownloadAudio(playerVC, progressPrefix, ^(FFMpegDownloadResult result) {
+    YTMUDownloadAudio(playerVC, progressPrefix, ^(FFMpegDownloadResult result) {
         YTMUQueueDownloader *strongSelf = weakSelf;
         if (!strongSelf) return;
 
@@ -258,20 +288,29 @@ static const NSUInteger kYTMUQueueMaxPolls = 60; // give each track 30 seconds t
             return;
         }
 
+        if (result == FFMpegDownloadResultFailed && strongSelf.retries == 0) {
+            // Stalls are usually a one-off network hiccup, try the same track once more
+            strongSelf.retries++;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kYTMUQueueTrackDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [strongSelf processCurrentIndex];
+            });
+            return;
+        }
+
         if (result == FFMpegDownloadResultSuccess) strongSelf.downloaded++;
         else strongSelf.failed++;
         [strongSelf advance];
     });
-
-    if (!started) {
-        self.failed++;
-        [self advance];
-    }
 }
 
 - (void)advance {
+    [self advanceAfterDelay:kYTMUQueueTrackDelay];
+}
+
+- (void)advanceAfterDelay:(NSTimeInterval)delay {
     self.index++;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    self.retries = 0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self processCurrentIndex];
     });
 }
@@ -374,12 +413,7 @@ static const NSUInteger kYTMUQueueMaxPolls = 60; // give each track 30 seconds t
 
 %new
 - (void)downloadAudio:(YTPlayerViewController *)playerVC {
-    if (!YTMUDownloadAudio(playerVC, nil, nil)) {
-        YTAlertView *alertView = [%c(YTAlertView) infoDialog];
-        alertView.title = LOC(@"OOPS");
-        alertView.subtitle = LOC(@"LINK_NOT_FOUND");
-        [alertView show];
-    }
+    YTMUDownloadAudio(playerVC, nil, nil);
 }
 
 %new
